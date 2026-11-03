@@ -1,5 +1,7 @@
 //! TCP service, request routing, and runtime integration tests.
 
+mod deadlines;
+
 use super::*;
 use crate::block::{Block, Transaction};
 use crate::blossom::{BlossomBody, EchoRequest, Header};

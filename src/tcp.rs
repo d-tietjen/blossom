@@ -659,30 +659,21 @@ impl TcpNode {
         msg: Msg,
     ) -> Result<BroadcastReport> {
         let frame = EncodedFrame::encode_wire_request(&WireRequest::Message(msg))?;
-        let mut handles = Vec::with_capacity(targets.len());
-        for service in targets {
+        let requests = targets.into_iter().map(|service| {
             let client = self.services.clone();
             let frame = frame.clone();
-            let service_for_task = service.clone();
-            handles.push((
-                service,
-                tokio::spawn(async move { client.request_frame(&service_for_task, &frame).await }),
-            ));
-        }
-        let mut receipts = Vec::with_capacity(handles.len());
-        for (service, handle) in handles {
-            let response = match handle.await {
-                Ok(response) => response,
-                Err(error) => Err(BlossomError::Io(format!(
-                    "persistent broadcast task failed: {error}"
-                ))),
-            };
-            receipts.push(BroadcastReceipt {
-                target: service.public_key,
-                service,
-                response,
-            });
-        }
+            async move {
+                let response = client.request_frame(&service, &frame).await;
+                BroadcastReceipt {
+                    target: service.public_key,
+                    service,
+                    response,
+                }
+            }
+        });
+        // Own every future in this call. Cancellation closes in-flight sockets
+        // instead of detaching spawned requests; input receipt order is stable.
+        let receipts = futures_util::future::join_all(requests).await;
         Ok(BroadcastReport { receipts })
     }
 
@@ -1114,8 +1105,15 @@ fn unknown_epoch_group(last_epoch: HashType) -> BlossomError {
     BlossomError::WireProtocol(format!("no consensus group is tracking epoch {last_epoch}"))
 }
 
+/// Default whole-request budget for service clients and one-shot TCP helpers.
+pub const DEFAULT_TCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A framed TCP connection whose in-flight exchange owns the socket.
+/// Cancellation or a transport error permanently closes that socket; a caller
+/// must reconnect rather than reuse a partial or late response.
 pub struct TcpConnection {
-    stream: TcpStream,
+    /// Present only between successful, fully framed request/response exchanges.
+    stream: Option<TcpStream>,
 }
 
 impl TcpConnection {
@@ -1124,22 +1122,49 @@ impl TcpConnection {
             .await
             .map_err(|err| BlossomError::Io(err.to_string()))?;
         configure_tcp_stream(&stream)?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream: Some(stream),
+        })
     }
 
     pub async fn request(&mut self, request: &WireRequest) -> Result<WireResponse> {
-        write_wire_request(&mut self.stream, request).await?;
-        read_wire_response(&mut self.stream).await
+        let frame = EncodedFrame::encode_wire_request(request)?;
+        self.request_frame(&frame).await
     }
 
     pub async fn request_frame(&mut self, frame: &EncodedFrame) -> Result<WireResponse> {
-        write_encoded_frame(&mut self.stream, frame).await?;
-        read_wire_response(&mut self.stream).await
+        let mut stream = self.take_stream()?;
+        let result = async {
+            write_encoded_frame(&mut stream, frame).await?;
+            read_wire_response(&mut stream).await
+        }
+        .await;
+        if result.is_ok() {
+            self.stream = Some(stream);
+        }
+        result
     }
 
     pub async fn request_raw_response(&mut self, request: &WireRequest) -> Result<EncodedFrame> {
-        write_wire_request(&mut self.stream, request).await?;
-        read_encoded_frame(&mut self.stream).await
+        let mut stream = self.take_stream()?;
+        let result = async {
+            write_wire_request(&mut stream, request).await?;
+            read_encoded_frame(&mut stream).await
+        }
+        .await;
+        if result.is_ok() {
+            self.stream = Some(stream);
+        }
+        result
+    }
+
+    /// Move ownership into the request future so dropping it closes the socket.
+    fn take_stream(&mut self) -> Result<TcpStream> {
+        self.stream.take().ok_or_else(|| {
+            BlossomError::Io(
+                "TCP connection closed after an interrupted exchange; reconnect required".into(),
+            )
+        })
     }
 }
 
@@ -1153,21 +1178,39 @@ pub async fn send_wire_request(
     addr: impl AsRef<str>,
     request: WireRequest,
 ) -> Result<WireResponse> {
-    let mut connection = TcpConnection::connect(addr).await?;
-    connection.request(&request).await
+    tokio::time::timeout(DEFAULT_TCP_REQUEST_TIMEOUT, async {
+        let mut connection = TcpConnection::connect(addr).await?;
+        connection.request(&request).await
+    })
+    .await
+    .map_err(|_| {
+        BlossomError::Io("TCP request deadline elapsed; remote outcome may be unknown".into())
+    })?
 }
 
 pub async fn send_wire_frame(addr: impl AsRef<str>, frame: &EncodedFrame) -> Result<WireResponse> {
-    let mut connection = TcpConnection::connect(addr).await?;
-    connection.request_frame(frame).await
+    tokio::time::timeout(DEFAULT_TCP_REQUEST_TIMEOUT, async {
+        let mut connection = TcpConnection::connect(addr).await?;
+        connection.request_frame(frame).await
+    })
+    .await
+    .map_err(|_| {
+        BlossomError::Io("TCP frame deadline elapsed; remote outcome may be unknown".into())
+    })?
 }
 
 pub async fn send_wire_request_raw_response(
     addr: impl AsRef<str>,
     request: WireRequest,
 ) -> Result<EncodedFrame> {
-    let mut connection = TcpConnection::connect(addr).await?;
-    connection.request_raw_response(&request).await
+    tokio::time::timeout(DEFAULT_TCP_REQUEST_TIMEOUT, async {
+        let mut connection = TcpConnection::connect(addr).await?;
+        connection.request_raw_response(&request).await
+    })
+    .await
+    .map_err(|_| {
+        BlossomError::Io("TCP raw-response deadline elapsed; remote outcome may be unknown".into())
+    })?
 }
 
 #[cfg(test)]

@@ -58,6 +58,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 ed25519-dalek = { version = "2.2.0", features = ["batch", "hazmat", "rand_core"] }
 eden_logger = { version = "=0.1.2", default-features = false, features = ["log-info", "log-warn", "log-error", "log-internal", "fast-telemetry-context"], optional = true }
 fast-telemetry = { version = "=0.9.0", default-features = false }
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 hex = { version = "0.4.3", features = ["serde"] }
 hmac = { version = "=0.12.1", optional = true }
 indextreemap = "0.2.0"
@@ -79,6 +80,7 @@ zeroize = "1.8.2"
 criterion = "0.7.0"
 env_logger = "0.11.8"
 hegeltest = "=0.28.2"
+socket2 = "0.6"
 tempfile = "3.23"
 
 [lints.rust]
