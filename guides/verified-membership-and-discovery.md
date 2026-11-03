@@ -46,6 +46,15 @@ verifier set. Registry add and key-rotation operations cannot grant
 supermajority `NodeAdmission` path. NAT-hidden clients and relays therefore do
 not increase or bypass the consensus quorum.
 
+Runtime snapshots bind the exact local public key and responsibility. Consensus
+snapshots require the key in the current verifier set. Overlay snapshots require
+an active committed Client, Relay or Validator capability; suspended, revoked,
+absent or roleless records cannot own a recovered Overlay runtime. The existing
+genesis, group, chain and certificate checks apply in both modes. Changing an
+Overlay snapshot to Consensus does not turn a Client/Relay into a validator.
+Retained snapshots preserve membership history, not a live forwarding lease:
+after restart, install a newly verified quorum lease before admitting traffic.
+
 ## Signed service records
 
 Remote discovery accepts `SignedServiceRecord`, not an unauthenticated

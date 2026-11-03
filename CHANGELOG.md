@@ -22,6 +22,11 @@ public Rust APIs and separately versions consensus and durable wire formats.
 
 ### Fixed
 
+- Overlay Client and Relay runtime snapshots now recover against their active
+  committed member identity without requiring validator membership. Consensus
+  snapshots retain validator ownership checks; inactive or absent Overlay keys
+  remain rejected, and recovery does not restore a fresh membership lease.
+
 - TCP service requests now have a bounded total deadline. Interrupted framed
   exchanges close their socket instead of returning a partial or late reply
   to the pool, and cancelled consensus/overlay broadcasts retain ownership of
