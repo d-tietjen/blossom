@@ -254,41 +254,34 @@ pub(crate) async fn broadcast_wire_request(
     const TRANSPORT_ATTEMPTS: usize = 3;
 
     let frame = EncodedFrame::encode_wire_request(&request)?;
-    let mut handles = Vec::with_capacity(targets.len());
-
-    for service in targets {
+    let requests = targets.into_iter().map(|service| {
         let frame = frame.clone();
-        let service_for_task = service.clone();
-        let handle = tokio::spawn(async move {
-            let mut last_error = None;
-            for attempt in 0..TRANSPORT_ATTEMPTS {
-                match send_wire_frame(service_for_task.socket_addr(), &frame).await {
-                    Ok(response) => return Ok(response),
-                    Err(error) => {
-                        last_error = Some(error);
-                        if attempt + 1 < TRANSPORT_ATTEMPTS {
-                            tokio::task::yield_now().await;
+        async move {
+            let response = async {
+                let mut last_error = BlossomError::Io("transport attempts exhausted".to_owned());
+                for attempt in 0..TRANSPORT_ATTEMPTS {
+                    match send_wire_frame(service.socket_addr(), &frame).await {
+                        Ok(response) => return Ok(response),
+                        Err(error) => {
+                            last_error = error;
+                            if attempt + 1 < TRANSPORT_ATTEMPTS {
+                                tokio::task::yield_now().await;
+                            }
                         }
                     }
                 }
+                Err(last_error)
             }
-            Err(last_error.expect("at least one transport attempt is configured"))
-        });
-        handles.push((service, handle));
-    }
-
-    let mut receipts = Vec::with_capacity(handles.len());
-    for (service, handle) in handles {
-        let response = match handle.await {
-            Ok(response) => response,
-            Err(err) => Err(BlossomError::Io(format!("broadcast task failed: {err}"))),
-        };
-        receipts.push(BroadcastReceipt {
-            target: service.public_key,
-            service,
-            response,
-        });
-    }
+            .await;
+            BroadcastReceipt {
+                target: service.public_key,
+                service,
+                response,
+            }
+        }
+    });
+    // Own every exchange; cancellation leaves no detached transport tasks.
+    let receipts = futures_util::future::join_all(requests).await;
 
     Ok(BroadcastReport { receipts })
 }
@@ -299,31 +292,19 @@ pub(crate) async fn broadcast_wire_request_pooled(
     client: &TcpServiceClient,
 ) -> Result<BroadcastReport> {
     let frame = EncodedFrame::encode_wire_request(&request)?;
-    let mut handles = Vec::with_capacity(targets.len());
-    for service in targets {
+    let requests = targets.into_iter().map(|service| {
         let client = client.clone();
         let frame = frame.clone();
-        let service_for_task = service.clone();
-        handles.push((
-            service,
-            tokio::spawn(async move { client.request_frame(&service_for_task, &frame).await }),
-        ));
-    }
-
-    let mut receipts = Vec::with_capacity(handles.len());
-    for (service, handle) in handles {
-        let response = match handle.await {
-            Ok(response) => response,
-            Err(error) => Err(BlossomError::Io(format!(
-                "pooled broadcast task failed: {error}"
-            ))),
-        };
-        receipts.push(BroadcastReceipt {
-            target: service.public_key,
-            service,
-            response,
-        });
-    }
+        async move {
+            let response = client.request_frame(&service, &frame).await;
+            BroadcastReceipt {
+                target: service.public_key,
+                service,
+                response,
+            }
+        }
+    });
+    let receipts = futures_util::future::join_all(requests).await;
     Ok(BroadcastReport { receipts })
 }
 

@@ -17,7 +17,7 @@ use crate::block::Block;
 use crate::error::{BlossomError, Result};
 use crate::group::ConsensusGroupId;
 use crate::nonce::Nonce;
-use crate::tcp::TcpConnection;
+use crate::tcp::{DEFAULT_TCP_REQUEST_TIMEOUT, TcpConnection};
 use crate::wire::{
     ApplicationRequest, ApplicationResponse, EncodedFrame, NodePing, NodePong, WireRequest,
     WireResponse,
@@ -44,6 +44,8 @@ struct TcpServicePool {
 pub struct TcpServiceClient {
     pool: Arc<TcpServicePool>,
     group_id: Option<ConsensusGroupId>,
+    /// Total budget including pool wait, connection and identical-frame retries.
+    request_timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +68,9 @@ impl TcpServiceClient {
     /// Idle connections are evicted when the pool is full. If every pooled
     /// connection is active, new destinations wait for a slot instead of
     /// exhausting the process file-descriptor limit.
+    /// The request deadline includes this wait. Quorum fanouts must admit
+    /// enough slots for their validator set and concurrent rounds: otherwise
+    /// stalled peers can consume the budget before healthy peers get a slot.
     pub fn with_max_connections(max_connections: NonZeroUsize) -> Self {
         let max_connections = max_connections.get();
         Self {
@@ -75,7 +80,28 @@ impl TcpServiceClient {
                 max_connections,
             }),
             group_id: None,
+            request_timeout: DEFAULT_TCP_REQUEST_TIMEOUT,
         }
+    }
+
+    /// Set a nonzero total RPC budget, including pool/connect/write/read/retry.
+    ///
+    /// Timeout is an unknown remote outcome, never proof that a mutation did
+    /// not run. Retrying callers must retain their operation/frame identity.
+    /// Cancelling a request closes its in-flight socket before pool reuse.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Result<Self> {
+        if timeout.is_zero() {
+            return Err(BlossomError::InvalidConfiguration(
+                "TCP request timeout must be nonzero".into(),
+            ));
+        }
+        self.request_timeout = timeout;
+        Ok(self)
+    }
+
+    /// Return this client's total per-request budget.
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 
     /// Routes ordinary requests through one group on a shared multi-group
@@ -115,6 +141,23 @@ impl TcpServiceClient {
         service: &Service,
         frame: &EncodedFrame,
     ) -> Result<WireResponse> {
+        tokio::time::timeout(
+            self.request_timeout,
+            self.request_frame_inner(service, frame),
+        )
+        .await
+        .map_err(|_| {
+            BlossomError::Io("TCP request deadline elapsed; remote outcome may be unknown".into())
+        })?
+    }
+
+    /// Retry only the identical encoded frame after ordinary transport failure.
+    /// The outer deadline also bounds pool-slot and connection waits.
+    async fn request_frame_inner(
+        &self,
+        service: &Service,
+        frame: &EncodedFrame,
+    ) -> Result<WireResponse> {
         let address = service.socket_addr();
         let connection = self.connection(&address).await?;
         let response = {
@@ -129,9 +172,7 @@ impl TcpServiceClient {
                 let replacement = self.connection(&address).await?;
                 let mut replacement = replacement.connection.lock().await;
                 replacement.request_frame(frame).await.map_err(|second_error| {
-                    BlossomError::ExternalService(format!(
-                        "persistent request failed ({first_error}); reconnect failed ({second_error})"
-                    ))
+                    BlossomError::ExternalService(format!("persistent request failed ({first_error}); reconnect failed ({second_error})"))
                 })
             }
         }

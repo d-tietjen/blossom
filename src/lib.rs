@@ -291,8 +291,9 @@ pub use subset_gossip::{
 };
 pub use tcp::{
     ApplicationHandler, ApplicationHandlerFuture, ConsensusDriverConfig, ConsensusDriverTick,
-    MultiGroupApplicationHandler, TcpConnection, TcpMultiGroupNode, TcpNode, TcpNodeMetrics,
-    TcpNodeMetricsSnapshot, send_wire_frame, send_wire_request, send_wire_request_raw_response,
+    DEFAULT_TCP_REQUEST_TIMEOUT, MultiGroupApplicationHandler, TcpConnection, TcpMultiGroupNode,
+    TcpNode, TcpNodeMetrics, TcpNodeMetricsSnapshot, send_wire_frame, send_wire_request,
+    send_wire_request_raw_response,
 };
 #[cfg(feature = "eden-logger")]
 pub use telemetry::EdenLoggerTelemetrySink;

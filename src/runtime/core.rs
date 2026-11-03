@@ -14,7 +14,26 @@ impl NodeRuntime {
     }
 
     /// Validates configuration and constructs a runtime.
-    pub fn try_new(mut config: RuntimeConfig) -> Result<Self> {
+    pub fn try_new(config: RuntimeConfig) -> Result<Self> {
+        Self::try_new_with_network_client(
+            config,
+            TcpServiceClient::with_max_connections(
+                NonZeroUsize::new(RUNTIME_BROADCAST_MAX_CONNECTIONS)
+                    .expect("runtime broadcast pool size is non-zero"),
+            ),
+        )
+    }
+
+    /// Construct with an application-owned transport admission/deadline policy.
+    ///
+    /// The internal broadcast/prefill client is independent of `TcpNode`'s
+    /// service client. Supply both explicitly when short leases or a wider
+    /// admitted validator set require different bounds. No protocol state or
+    /// durable snapshot changes; clones retain this same runtime-owned pool.
+    pub fn try_new_with_network_client(
+        mut config: RuntimeConfig,
+        network_client: TcpServiceClient,
+    ) -> Result<Self> {
         if config.trust_mode.is_high_availability() {
             return Err(BlossomError::InvalidConfiguration(
                 "high-availability mode uses HighAvailabilityRuntime, not NodeRuntime".to_string(),
@@ -196,10 +215,7 @@ impl NodeRuntime {
                 #[cfg(feature = "availability-gossip")]
                 availability: RwLock::new(AvailabilityStore::default()),
                 address_book: RwLock::new(config.address_book),
-                network_client: TcpServiceClient::with_max_connections(
-                    NonZeroUsize::new(RUNTIME_BROADCAST_MAX_CONNECTIONS)
-                        .expect("runtime broadcast pool size is non-zero"),
-                ),
+                network_client,
                 latency_topology: RwLock::new(LatencyTopology::default()),
                 signer,
                 trust_mode: config.trust_mode,

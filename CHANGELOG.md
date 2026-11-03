@@ -22,6 +22,11 @@ public Rust APIs and separately versions consensus and durable wire formats.
 
 ### Fixed
 
+- TCP service requests now have a bounded total deadline. Interrupted framed
+  exchanges close their socket instead of returning a partial or late reply
+  to the pool, and cancelled consensus/overlay broadcasts retain ownership of
+  every pending request rather than detaching transport tasks.
+
 - Membership-lease anti-equivocation and RPC rate-limit state now expires and
   is reclaimed instead of growing for the lifetime of the process. Snapshot
   restoration remains backward compatible and conservatively ages legacy
