@@ -902,3 +902,151 @@ fn reconnect_admission_rejects_duplicates_stale_and_sybil_votes() {
     assert!(!stale_decision.accepted);
     assert_eq!(stale_decision.reason, "stale admission target");
 }
+
+/// A registered Overlay member in a synthetic trusted genesis, with an
+/// independent validator. No production membership admission is bypassed.
+fn overlay_snapshot_runtime(capability: crate::MemberCapability) -> (NodeRuntime, NodeIdentity) {
+    let group = ConsensusGroupId::root();
+    let validator = NodeIdentity::generate("tcp", "127.0.0.1", 8080);
+    let local = NodeIdentity::generate("tcp", "127.0.0.1", 8081);
+    let mut genesis = genesis_epoch_for_group(group, [validator]);
+    let operation = crate::CommittedMemberOperation {
+        group_id: group,
+        parent_epoch_hash: genesis.hash,
+        operation: crate::MemberOperation::Add(
+            crate::MemberRecord::new(local.public_only(), [capability], 1).expect("fixture member"),
+        ),
+    };
+    let mut block = Block::default();
+    block
+        .body
+        .txs
+        .push(operation.to_transaction().expect("fixture operation"));
+    genesis.body.members = crate::apply_committed_member_operations(
+        &genesis.body.members,
+        &BTreeMap::from([(HashType::hash(b"fixture-member"), block)]),
+        group,
+        genesis.hash,
+    );
+    genesis.set_hash();
+    let mut config = RuntimeConfig::for_group(local.clone(), group);
+    config.genesis = Some(genesis);
+    config.mode = RuntimeMode::Overlay;
+    (
+        NodeRuntime::try_new(config).expect("fixture Overlay runtime"),
+        local,
+    )
+}
+
+#[test]
+fn overlay_member_snapshot_recovers_client_and_relay_without_inheriting_a_lease() {
+    for capability in [
+        crate::MemberCapability::Client,
+        crate::MemberCapability::Relay,
+    ] {
+        let (runtime, local) = overlay_snapshot_runtime(capability);
+        let path = std::env::temp_dir().join(format!(
+            "blossom-overlay-{}-{}.json",
+            std::process::id(),
+            local.public_key()
+        ));
+        runtime
+            .write_snapshot(&path)
+            .expect("write Overlay snapshot");
+        let snapshot = RuntimeSnapshotV1::read_json(&path).expect("read Overlay snapshot");
+        std::fs::remove_file(&path).expect("remove owned fixture snapshot");
+        assert_eq!(snapshot.mode, RuntimeMode::Overlay);
+        assert_eq!(snapshot.self_public_key, local.public_key());
+        assert!(
+            !snapshot
+                .epochchain
+                .epochchain
+                .last()
+                .expect("tip")
+                .body
+                .verifiers
+                .contains_key(&local.public_key())
+        );
+        let recovered = NodeRuntime::try_new(
+            RuntimeConfig::from_snapshot(snapshot.clone(), local.clone())
+                .expect("restore identity"),
+        )
+        .expect("recover Overlay runtime");
+        assert!(!recovered.watch_verified_membership().borrow().is_fresh());
+        let mut changed_mode = snapshot.clone();
+        changed_mode.mode = RuntimeMode::Consensus;
+        assert!(
+            changed_mode.validate().is_err(),
+            "Client/Relay membership cannot substitute for a validator"
+        );
+        assert!(
+            snapshot
+                .validate_for_node(&NodeIdentity::generate("tcp", "127.0.0.1", 8082))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn overlay_member_snapshot_refuses_absent_suspended_revoked_and_invalid_history() {
+    for capability in [
+        crate::MemberCapability::Client,
+        crate::MemberCapability::Relay,
+    ] {
+        let (runtime, local) = overlay_snapshot_runtime(capability);
+        let original = runtime.snapshot().expect("valid Overlay snapshot");
+        for revoke in [true, false] {
+            let mut snapshot = original.clone();
+            let epoch = snapshot
+                .epochchain
+                .epochchain
+                .last_mut()
+                .expect("fixture tip");
+            let operation = crate::CommittedMemberOperation {
+                group_id: snapshot.group_id,
+                parent_epoch_hash: epoch.hash,
+                operation: if revoke {
+                    crate::MemberOperation::Revoke {
+                        public_key: local.public_key(),
+                        generation: 2,
+                    }
+                } else {
+                    crate::MemberOperation::Suspend {
+                        public_key: local.public_key(),
+                        generation: 2,
+                    }
+                },
+            };
+            let mut block = Block::default();
+            block
+                .body
+                .txs
+                .push(operation.to_transaction().expect("fixture status change"));
+            epoch.body.members = crate::apply_committed_member_operations(
+                &epoch.body.members,
+                &BTreeMap::from([(HashType::hash(b"fixture-status"), block)]),
+                snapshot.group_id,
+                epoch.hash,
+            );
+            epoch.set_hash();
+            assert!(
+                snapshot.validate().is_err(),
+                "inactive Overlay member cannot own a recovered runtime"
+            );
+        }
+        let mut absent = original.clone();
+        absent.self_public_key = Keypair::generate().public;
+        assert!(absent.validate().is_err());
+        let mut tampered = original;
+        tampered
+            .epochchain
+            .epochchain
+            .last_mut()
+            .expect("fixture tip")
+            .hash = HashType::hash(b"invalid snapshot hash");
+        assert!(
+            tampered.validate().is_err(),
+            "Overlay recovery retains the existing hash and chain checks"
+        );
+    }
+}

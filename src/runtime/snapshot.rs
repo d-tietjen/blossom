@@ -57,6 +57,10 @@ impl RuntimeSnapshotV1 {
     }
 
     /// Validates format, genesis, chain linkage, certificates, and membership.
+    /// Consensus ownership requires a current validator key. Overlay ownership
+    /// instead requires an active committed member capability; clients and
+    /// relays need not be validators. Restoring either mode grants no fresh
+    /// membership lease.
     pub fn validate(&self) -> Result<()> {
         if self.version != Self::VERSION {
             return Err(BlossomError::WireProtocol(format!(
@@ -128,9 +132,27 @@ impl RuntimeSnapshotV1 {
             .epochchain
             .last()
             .ok_or(BlossomError::EmptyEpochChain)?;
-        if !latest.body.verifiers.contains_key(&self.self_public_key) {
+        let owns_runtime = match self.mode {
+            RuntimeMode::Consensus => latest.body.verifiers.contains_key(&self.self_public_key),
+            RuntimeMode::Overlay => {
+                latest
+                    .body
+                    .members
+                    .get(&self.self_public_key)
+                    .is_some_and(|member| {
+                        [
+                            crate::MemberCapability::Client,
+                            crate::MemberCapability::Relay,
+                            crate::MemberCapability::Validator,
+                        ]
+                        .into_iter()
+                        .any(|capability| member.is_active_with(capability))
+                    })
+            }
+        };
+        if !owns_runtime {
             return Err(BlossomError::WireProtocol(
-                "snapshot self public key is not in latest verifier set".to_string(),
+                "snapshot self public key does not own the configured runtime mode".to_string(),
             ));
         }
         let watermark_challenges = self
