@@ -59,7 +59,8 @@ pub struct ConsensusDriverConfig {
     /// share. Trusted consensus may still opt out.
     pub drive_prefill: bool,
     pub drive_dispatch: bool,
-    /// Do not initiate an epoch until this node has a locally submitted block.
+    /// Do not initiate an epoch without local application work or authenticated
+    /// peer work for the current epoch.
     ///
     /// This is useful for request-driven deployments and benchmarks that must
     /// not create empty epochs while idle. The compatibility default remains
@@ -215,19 +216,29 @@ impl TcpNode {
             } else {
                 interval.tick().await;
             }
+            let mut dissemination_only = false;
             if config.require_local_pending_block {
                 let status = self.runtime.status()?;
                 if active_nonce.is_some_and(|nonce| nonce != status.next_nonce) {
                     active_nonce = None;
                 }
                 if active_nonce.is_none() {
-                    if status.pending_blocks == 0 {
-                        continue;
+                    if status.pending_blocks == 0 && !self.has_peer_consensus_work()? {
+                        dissemination_only = true;
+                    } else {
+                        active_nonce = Some(status.next_nonce);
                     }
-                    active_nonce = Some(status.next_nonce);
                 }
             }
-            if let Err(error) = self.drive_consensus_once(&config).await {
+            // A newly committed head still needs certificate announcement and
+            // catch-up retries. This path cannot dispatch a block or initiate
+            // another epoch while application work is absent.
+            let result = if dissemination_only {
+                self.drive_epoch_dissemination_once().await
+            } else {
+                self.drive_consensus_once(&config).await
+            };
+            if let Err(error) = result {
                 if config.continue_after_error {
                     self.runtime.emit_telemetry_failure(
                         "service",
@@ -241,6 +252,26 @@ impl TcpNode {
                 }
             }
         }
+    }
+
+    /// Join an authenticated in-progress round without initiating idle epochs.
+    ///
+    /// Group listeners and drivers may own different notification handles.
+    /// Inspecting the runtime on interval ticks also covers that arrangement.
+    fn has_peer_consensus_work(&self) -> Result<bool> {
+        let round = self.runtime.current_consensus_round()?;
+        let state = self.runtime.consensus_round_status(round)?;
+        let prefill = self.runtime.prefill_stage_status()?;
+        Ok(state.received_dispatches != 0
+            || state.pending_dispatches != 0
+            || state.verification_senders != 0
+            || state.proposal_senders != 0
+            || state.commit_senders != 0
+            || prefill
+                .recorded_senders
+                .iter()
+                .any(|key| *key != prefill.self_key)
+            || !self.runtime.epoch_started_catch_up_services()?.is_empty())
     }
 
     pub async fn drive_consensus_once(

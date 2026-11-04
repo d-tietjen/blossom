@@ -1486,6 +1486,36 @@ impl NodeRuntime {
                     .local_blocks
                     .write()
                     .expect("block lock poisoned");
+                // Prefill/round zero seals this epoch's own block exactly
+                // once. Requests arriving during later rounds stay queued
+                // for the next epoch rather than being discarded when the
+                // original own block is already present in the aggregate.
+                if round == 0
+                    && local_blocks.is_empty()
+                    && !local_blocks.build_block.body.txs.is_empty()
+                {
+                    local_blocks.close_block_with(target.last_epoch, target.nonce, |block| {
+                        if self.inner.trust_mode.is_trusted() {
+                            block.seal_unsigned(self_node.public_key());
+                        } else {
+                            block.sign_with(
+                                self.inner
+                                    .signer
+                                    .as_ref()
+                                    .ok_or(BlossomError::MissingSecretKey)?,
+                            );
+                        }
+                        Ok(())
+                    })?;
+                }
+                // Persist before removing a queued candidate. A transient
+                // storage error must leave the exact sealed block available
+                // for the request-driven retry, not replace it with emptiness.
+                if let Some(block) = local_blocks.block_deque.front()
+                    && block.body.nonce == target.nonce
+                {
+                    self.persist_block_if_configured(block)?;
+                }
                 let maybe_block = local_blocks.dequeue_block(
                     block_service.as_ref().map(|service| service.public_key),
                     target.last_epoch,
@@ -1525,6 +1555,7 @@ impl NodeRuntime {
                 _ => {}
             }
 
+            let was_queued = maybe_block.is_some();
             let block = match maybe_block {
                 Some(block) => block,
                 None => self.empty_block(
@@ -1537,7 +1568,9 @@ impl NodeRuntime {
             };
             #[cfg(feature = "availability-gossip")]
             self.store_filtered_payloads_from_block(&block)?;
-            self.persist_block_if_configured(&block)?;
+            if !was_queued {
+                self.persist_block_if_configured(&block)?;
+            }
 
             let mut blocks = if round > 0 {
                 let mut state = self.inner.state.write().expect("state lock poisoned");

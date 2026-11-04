@@ -22,6 +22,11 @@ public Rust APIs and separately versions consensus and durable wire formats.
 
 ### Fixed
 
+- Request-driven consensus now starts on open application transactions and
+  joins authenticated peer rounds without creating empty epochs while idle.
+  Networks smaller than the configured branching factor select all validators
+  in their first quorum; full-validator finality thresholds are unchanged.
+
 - Overlay Client and Relay runtime snapshots now recover against their active
   committed member identity without requiring validator membership. Consensus
   snapshots retain validator ownership checks; inactive or absent Overlay keys
