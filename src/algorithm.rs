@@ -244,6 +244,15 @@ where
         None => return Vec::new(),
     };
 
+    // A partial first-level group is one complete quorum. Applying the
+    // higher-level stride calculation here would select only each node's
+    // own position when the membership is smaller than the branching factor.
+    if node_map.len() <= quorum_size.get() {
+        let mut quorum = node_map.keys().copied().collect::<Vec<_>>();
+        quorum.sort_unstable();
+        return vec![quorum];
+    }
+
     let (optimal_network_size, rounds) = find_round_number_with_size(node_map.len(), quorum_size);
     if optimal_network_size == 0 || rounds == 0 {
         return Vec::new();
@@ -555,6 +564,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_first_level_quorum_contains_every_validator() {
+        for count in [1, 2, 3, 4, 5, 6, 7] {
+            let nodes = (0..count).map(key).collect::<BTreeSet<_>>();
+            for self_key in &nodes {
+                for shuffle in [false, true] {
+                    let quorums = select_quorums(
+                        nodes.iter().copied(),
+                        self_key,
+                        HashType::default(),
+                        shuffle,
+                    );
+                    assert_eq!(quorums.len(), 1);
+                    assert_eq!(quorums[0].iter().copied().collect::<BTreeSet<_>>(), nodes);
+                }
+            }
+        }
+    }
 
     fn key(index: u8) -> PubKey {
         PubKey([index; 32])

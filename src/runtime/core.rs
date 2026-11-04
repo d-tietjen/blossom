@@ -549,7 +549,7 @@ impl NodeRuntime {
             .local_blocks
             .read()
             .expect("block lock poisoned")
-            .len();
+            .pending_block_count();
         let services = self.address_book();
 
         let node = state.self_node.public_only();

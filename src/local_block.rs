@@ -86,17 +86,32 @@ impl LocalBlock {
         last_epoch: HashType,
         nonce: Nonce,
     ) -> Result<HashType> {
-        self.build_block.body.last_epoch = last_epoch;
-        self.build_block.body.nonce = nonce;
-        self.build_block.body.application_state = self.application_state.clone();
-        self.build_block.body.encounter_records = self.encounter_records.clone();
-        self.build_block.body.node_admissions = self.node_admissions.clone();
-        self.build_block.sign(secret_key);
+        self.close_block_with(last_epoch, nonce, |block| {
+            block.sign(secret_key);
+            Ok(())
+        })
+    }
 
-        self.ensure_enqueueable(&self.build_block)?;
-        let hash = self.build_block.hash;
-        let block = mem::take(&mut self.build_block);
+    /// Seal the open application block with the runtime's execution policy.
+    ///
+    /// Failed signing or queue admission preserves all pending contents.
+    pub(crate) fn close_block_with(
+        &mut self,
+        last_epoch: HashType,
+        nonce: Nonce,
+        seal: impl FnOnce(&mut Block) -> Result<()>,
+    ) -> Result<HashType> {
+        let mut block = self.build_block.clone();
+        block.body.last_epoch = last_epoch;
+        block.body.nonce = nonce;
+        block.body.application_state = self.application_state.clone();
+        block.body.encounter_records = self.encounter_records.clone();
+        block.body.node_admissions = self.node_admissions.clone();
+        seal(&mut block)?;
+        self.ensure_enqueueable(&block)?;
+        let hash = block.hash;
         self.block_deque.push_back(block);
+        self.build_block = Block::default();
         self.encounter_records.clear();
         self.node_admissions.clear();
         Ok(hash)
@@ -184,6 +199,15 @@ impl LocalBlock {
 
     pub fn len(&self) -> usize {
         self.block_deque.len()
+    }
+
+    /// Counts closed blocks and the open block when it contains transactions.
+    ///
+    /// A request-driven driver must notice submitted application transactions
+    /// before dispatch closes their block. Persistent application-state bytes
+    /// alone do not initiate a new epoch.
+    pub(crate) fn pending_block_count(&self) -> usize {
+        self.block_deque.len() + usize::from(!self.build_block.body.txs.is_empty())
     }
 
     pub fn is_empty(&self) -> bool {

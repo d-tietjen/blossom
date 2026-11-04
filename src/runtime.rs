@@ -514,7 +514,7 @@ pub struct NodeStatus {
     pub last_epoch_nonce: Nonce,
     /// Nonce expected for the next epoch.
     pub next_nonce: Nonce,
-    /// Number of queued local blocks.
+    /// Closed local blocks plus an open block containing submitted transactions.
     pub pending_blocks: usize,
     /// Operator-configured quorum branching factor.
     pub configured_quorum_size: usize,
